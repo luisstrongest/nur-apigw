@@ -1,0 +1,132 @@
+# =============================================================================
+# nur-apigw - API Gateway + Keycloak + PostgreSQL
+#
+# PRE-REQUISITOS:
+#   - Docker Engine >= 24 y Docker Compose V2
+#   - Archivo .env creado:   cp .env.example .env
+#
+# USO:
+#   docker compose up -d --build     # levantar todo
+#   docker compose ps                # ver estado
+#   docker compose logs -f keycloak-init
+#   docker compose down              # bajar (agregar -v para borrar datos)
+#
+# ORDEN DE ARRANQUE (depends_on + healthchecks):
+#   keycloak-db (healthy) -> keycloak (healthy) -> keycloak-init (completed) -> api-gateway
+#
+# PUERTOS PUBLICADOS EN EL HOST:
+#   api-gateway   http://localhost:8090
+#   keycloak      http://localhost:8180  (consola admin)
+# =============================================================================
+
+name: nur-apigw
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Base de datos de Keycloak (persistencia de realms, clients y usuarios)
+  # ---------------------------------------------------------------------------
+  keycloak-db:
+    image: postgres:16-alpine
+    container_name: nur-apigw-keycloak-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${KC_DB_NAME}
+      POSTGRES_USER: ${KC_DB_USERNAME}
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD}
+    volumes:
+      - keycloak-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    networks: [apigw-net]
+
+  # ---------------------------------------------------------------------------
+  # Keycloak (Identity Provider: emite y firma los JWT)
+  # ---------------------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}
+    container_name: nur-apigw-keycloak
+    restart: unless-stopped
+    command: start
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/${KC_DB_NAME}
+      KC_DB_USERNAME: ${KC_DB_USERNAME}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      # URL publica fija: el claim "iss" de los tokens siempre sera esta,
+      # sin importar si el token se pide desde el host o desde la red Docker.
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL}
+      # Permite que los contenedores usen http://keycloak:8080 para el backchannel
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "${KEYCLOAK_HOST_PORT}:8080"
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    healthcheck:
+      # La imagen no trae curl/wget: se usa /dev/tcp de bash contra el puerto de gestion
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
+      interval: 10s
+      timeout: 5s
+      # El primer arranque (build de Quarkus + esquema de BD) puede tardar varios minutos
+      retries: 60
+      start_period: 60s
+    networks: [apigw-net]
+
+  # ---------------------------------------------------------------------------
+  # Inicializador: crea realm, client y usuarios (kcadm.sh) y termina
+  # ---------------------------------------------------------------------------
+  keycloak-init:
+    image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}
+    container_name: nur-apigw-keycloak-init
+    restart: "no"
+    entrypoint: ["/bin/bash", "/scripts/init-keycloak.sh"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      USERS_PASSWORD: ${USERS_PASSWORD}
+    volumes:
+      - ./keycloak/init-keycloak.sh:/scripts/init-keycloak.sh:ro
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    networks: [apigw-net]
+
+  # ---------------------------------------------------------------------------
+  # API Gateway (Spring Cloud Gateway)
+  # ---------------------------------------------------------------------------
+  api-gateway:
+    build: .
+    image: luisstrongest/nur-apigw:1.0.0
+    container_name: nur-apigw-gateway
+    restart: unless-stopped
+    environment:
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: ${KEYCLOAK_PUBLIC_URL}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+    ports:
+      - "${GATEWAY_HOST_PORT}:8080"
+    depends_on:
+      keycloak-init:
+        condition: service_completed_successfully
+    networks: [apigw-net]
+
+volumes:
+  keycloak-db-data:
+
+networks:
+  apigw-net:

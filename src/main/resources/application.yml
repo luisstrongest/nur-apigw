@@ -1,0 +1,56 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: nur-apigw
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Las claves publicas se descargan por la red interna de Docker...
+          jwk-set-uri: ${KEYCLOAK_INTERNAL_URL:http://localhost:8180}/realms/${KEYCLOAK_REALM:nur}/protocol/openid-connect/certs
+          # ...pero el claim "iss" del token siempre es la URL publica (KC_HOSTNAME).
+          issuer-uri: ${KEYCLOAK_PUBLIC_URL:http://localhost:8180}/realms/${KEYCLOAK_REALM:nur}
+
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            # GET /api/users[/**] -> https://jsonplaceholder.typicode.com/users[/**]
+            - id: users
+              uri: https://jsonplaceholder.typicode.com
+              predicates:
+                - Path=/api/users,/api/users/**
+                - Method=GET
+              filters:
+                - RewritePath=/api/(?<segment>.*), /$\{segment}
+                # El token es nuestro: no se filtra a un servicio de terceros
+                - RemoveRequestHeader=Authorization
+
+            # GET /api/posts[/**] -> https://jsonplaceholder.typicode.com/posts[/**]
+            - id: posts
+              uri: https://jsonplaceholder.typicode.com
+              predicates:
+                - Path=/api/posts,/api/posts/**
+                - Method=GET
+              filters:
+                - RewritePath=/api/(?<segment>.*), /$\{segment}
+                - RemoveRequestHeader=Authorization
+
+keycloak:
+  token-uri: ${KEYCLOAK_INTERNAL_URL:http://localhost:8180}/realms/${KEYCLOAK_REALM:nur}/protocol/openid-connect/token
+  client-id: ${KEYCLOAK_CLIENT_ID:api-gateway}
+  client-secret: ${KEYCLOAK_CLIENT_SECRET:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true

@@ -1,0 +1,18 @@
+# Secretos locales (usar .env.example como plantilla)
+.env
+
+# Maven
+target/
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# SO / logs
+.DS_Store
+Thumbs.db
+*.log

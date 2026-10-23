@@ -1,0 +1,10 @@
+target/
+.git/
+.idea/
+.vscode/
+.env
+.env.example
+keycloak/
+postman/
+*.md
+docker-compose.yml
